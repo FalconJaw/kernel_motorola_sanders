@@ -516,6 +516,7 @@ static void cmdq_prep_task_desc(struct mmc_request *mrq,
 {
 	struct mmc_cmdq_req *cmdq_req = mrq->cmdq_req;
 	u32 req_flags = cmdq_req->cmdq_req_flags;
+	unsigned long flags;
 
 	pr_debug("%s: %s: data-tag: 0x%08x - dir: %d - prio: %d - cnt: 0x%08x -	addr: 0x%llx\n",
 		 mmc_hostname(mrq->host), __func__,
@@ -523,6 +524,7 @@ static void cmdq_prep_task_desc(struct mmc_request *mrq,
 		 !!(req_flags & PRIO), cmdq_req->data.blocks,
 		 (u64)mrq->cmdq_req->blk_addr);
 
+	local_irq_save(flags);
 	*data = VALID(1) |
 		END(1) |
 		INT(intr) |
@@ -542,6 +544,9 @@ static void cmdq_prep_task_desc(struct mmc_request *mrq,
 		lower_32_bits(*data),
 		upper_32_bits(*data),
 		mrq->cmdq_req->data.blocks);
+
+	mb();
+	local_irq_restore(flags);
 }
 
 static int cmdq_dma_map(struct mmc_host *host, struct mmc_request *mrq)
@@ -568,6 +573,9 @@ static void cmdq_set_tran_desc(u8 *desc, dma_addr_t addr, int len,
 				bool end, bool is_dma64)
 {
 	__le32 *attr = (__le32 __force *)desc;
+	unsigned long flags;
+
+	local_irq_save(flags);
 
 	*attr = (VALID(1) |
 		 END(end ? 1 : 0) |
@@ -584,6 +592,9 @@ static void cmdq_set_tran_desc(u8 *desc, dma_addr_t addr, int len,
 
 		dataddr[0] = cpu_to_le32(addr);
 	}
+
+	mb();
+	local_irq_restore(flags);
 }
 
 static int cmdq_prep_tran_desc(struct mmc_request *mrq,
@@ -652,6 +663,7 @@ static void cmdq_prep_dcmd_desc(struct mmc_host *mmc,
 	__le64 *dataddr;
 	struct cmdq_host *cq_host = mmc_cmdq_private(mmc);
 	u8 timing;
+	unsigned long flags;
 
 	if (!(mrq->cmd->flags & MMC_RSP_PRESENT)) {
 		resp_type = 0x0;
@@ -666,6 +678,7 @@ static void cmdq_prep_dcmd_desc(struct mmc_host *mmc,
 		}
 	}
 
+	local_irq_save(flags);
 	task_desc = (__le64 __force *)get_desc(cq_host, cq_host->dcmd_slot);
 	memset(task_desc, 0, cq_host->task_desc_len);
 	data |= (VALID(1) |
@@ -677,16 +690,19 @@ static void cmdq_prep_dcmd_desc(struct mmc_host *mmc,
 		 CMD_TIMING(timing) | RESP_TYPE(resp_type));
 	*task_desc |= data;
 	desc = (u8 *)task_desc;
-	pr_debug("cmdq: dcmd: cmd: %d timing: %d resp: %d\n",
-		mrq->cmd->opcode, timing, resp_type);
 	dataddr = (__le64 __force *)(desc + 4);
 	dataddr[0] = cpu_to_le64((u64)mrq->cmd->arg);
+	mb();
+	local_irq_restore(flags);
+
 	cmdq_log_task_desc_history(cq_host, *task_desc, true);
 	MMC_TRACE(mrq->host,
 		"%s: DCMD: Task: 0x%08x | Args: 0x%08x\n",
 		__func__,
 		lower_32_bits(*task_desc),
 		upper_32_bits(*task_desc));
+	pr_debug("cmdq: dcmd: cmd: %d timing: %d resp: %d\n",
+		mrq->cmd->opcode, timing, resp_type);
 }
 
 static void cmdq_pm_qos_vote(struct sdhci_host *host, struct mmc_request *mrq)
@@ -781,33 +797,6 @@ out:
 	return err;
 }
 
-static int cmdq_get_first_valid_tag(struct cmdq_host *cq_host)
-{
-	u32 dbr_set = 0, tag = 0;
-
-	dbr_set = cmdq_readl(cq_host, CQTDBR);
-	if (!dbr_set) {
-		pr_err("%s: spurious/force error interrupt\n",
-				mmc_hostname(cq_host->mmc));
-		cmdq_halt_poll(cq_host->mmc, false);
-		mmc_host_clr_halt(cq_host->mmc);
-		return -EINVAL;
-	}
-
-	tag = ffs(dbr_set) - 1;
-	pr_err("%s: error tag selected: tag = %d\n",
-		mmc_hostname(cq_host->mmc), tag);
-	return tag;
-}
-
-static bool cmdq_is_valid_tag(struct mmc_host *mmc, unsigned int tag)
-{
-	struct mmc_cmdq_context_info *ctx_info = &mmc->cmdq_ctx;
-
-	return
-	(!!(ctx_info->data_active_reqs & (1 << tag)) || tag == DCMD_SLOT);
-}
-
 static void cmdq_finish_data(struct mmc_host *mmc, unsigned int tag)
 {
 	struct mmc_request *mrq;
@@ -827,7 +816,7 @@ static void cmdq_finish_data(struct mmc_host *mmc, unsigned int tag)
 	mrq->done(mrq);
 }
 
-irqreturn_t cmdq_irq(struct mmc_host *mmc, int err, bool is_cmd_err)
+irqreturn_t cmdq_irq(struct mmc_host *mmc, int err)
 {
 	u32 status;
 	unsigned long tag = 0, err_tag = 0, comp_status = 0;
@@ -835,6 +824,7 @@ irqreturn_t cmdq_irq(struct mmc_host *mmc, int err, bool is_cmd_err)
 	unsigned long err_info = 0;
 	struct mmc_request *mrq = NULL, *err_mrq;
 	int ret;
+	u32 dbr_set = 0;
 
 	status = cmdq_readl(cq_host, CQIS);
 
@@ -883,10 +873,18 @@ irqreturn_t cmdq_irq(struct mmc_host *mmc, int err, bool is_cmd_err)
 			 *   have caused such error, so check for any first
 			 *   bit set in doorbell and proceed with an error.
 			 */
-			tag = cmdq_get_first_valid_tag(cq_host);
-			if (tag == -EINVAL)
-				goto out;
+			dbr_set = cmdq_readl(cq_host, CQTDBR);
+			if (!dbr_set) {
+				pr_err("%s: spurious/force error interrupt\n",
+						mmc_hostname(mmc));
+				cmdq_halt_poll(mmc, false);
+				mmc_host_clr_halt(mmc);
+				return IRQ_HANDLED;
+			}
 
+			tag = ffs(dbr_set) - 1;
+			pr_err("%s: error tag selected: tag = %lu\n",
+					mmc_hostname(mmc), tag);
 			mrq = get_req_by_tag(cq_host, tag);
 			if (mrq->data)
 				mrq->data->error = err;
@@ -901,23 +899,9 @@ irqreturn_t cmdq_irq(struct mmc_host *mmc, int err, bool is_cmd_err)
 			goto skip_cqterri;
 		}
 
-		if (is_cmd_err && (err_info & CQ_RMEFV)) {
+		if (err_info & CQ_RMEFV) {
 			tag = GET_CMD_ERR_TAG(err_info);
 			pr_err("%s: CMD err tag: %lu\n", __func__, tag);
-
-			/*
-			 * In some cases CQTERRI is not providing reliable tag
-			 * info. If the tag is not valid, complete the request
-			 * with any valid tag so that all tags will get
-			 * requeued.
-			 */
-			if (!cmdq_is_valid_tag(mmc, tag)) {
-				pr_err("%s: CMD err tag is invalid: %lu\n",
-						__func__, tag);
-				tag = cmdq_get_first_valid_tag(cq_host);
-				if (tag == -EINVAL)
-					goto out;
-			}
 
 			mrq = get_req_by_tag(cq_host, tag);
 			/* CMD44/45/46/47 will not have a valid cmd */
@@ -928,26 +912,8 @@ irqreturn_t cmdq_irq(struct mmc_host *mmc, int err, bool is_cmd_err)
 		} else {
 			tag = GET_DAT_ERR_TAG(err_info);
 			pr_err("%s: Dat err  tag: %lu\n", __func__, tag);
-
-			/*
-			 * In some cases CQTERRI is not providing reliable tag
-			 * info. If the tag is not valid, complete the request
-			 * with any valid tag so that all tags will get
-			 * requeued.
-			 */
-			if (!cmdq_is_valid_tag(mmc, tag)) {
-				pr_err("%s: CMD err tag is invalid: %lu\n",
-						__func__, tag);
-				tag = cmdq_get_first_valid_tag(cq_host);
-				if (tag == -EINVAL)
-					goto out;
-			}
 			mrq = get_req_by_tag(cq_host, tag);
-
-			if (mrq->data)
-				mrq->data->error = err;
-			else
-				mrq->cmd->error = err;
+			mrq->data->error = err;
 		}
 
 skip_cqterri:
@@ -1115,6 +1081,7 @@ static int cmdq_halt(struct mmc_host *mmc, bool halt)
 	u32 ret = 0;
 	u32 config = 0;
 	int retries = 3;
+	unsigned long flags;
 
 	cmdq_runtime_pm_get(cq_host);
 	if (halt) {
@@ -1153,6 +1120,8 @@ static int cmdq_halt(struct mmc_host *mmc, bool halt)
 		}
 		ret = retries ? 0 : -ETIMEDOUT;
 	} else {
+
+		local_irq_save(flags);
 		if (cq_host->ops->set_transfer_params)
 			cq_host->ops->set_transfer_params(mmc);
 		if (cq_host->ops->set_block_size)
@@ -1162,8 +1131,11 @@ static int cmdq_halt(struct mmc_host *mmc, bool halt)
 		if (cq_host->ops->clear_set_irqs)
 			cq_host->ops->clear_set_irqs(mmc, true);
 		MMC_TRACE(mmc, "%s: unhalt done\n", __func__);
+		/* clear the halt flag before we enable cmdq */
+		mmc_host_clr_halt(mmc);
 		cmdq_writel(cq_host, cmdq_readl(cq_host, CQCTL) & ~HALT,
 			    CQCTL);
+		local_irq_restore(flags);
 	}
 	cmdq_runtime_pm_put(cq_host);
 	return ret;
