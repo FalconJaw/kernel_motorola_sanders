@@ -1355,10 +1355,8 @@ static int __device_suspend(struct device *dev, pm_message_t state, bool async)
 
 	dpm_wait_for_children(dev, async);
 
-	if (async_error) {
-		dev->power.direct_complete = false;
+	if (async_error)
 		goto Complete;
-	}
 
 	/*
 	 * If a device configured to wake up the system from sleep states
@@ -1373,7 +1371,6 @@ static int __device_suspend(struct device *dev, pm_message_t state, bool async)
 		pm_get_active_wakeup_sources(suspend_abort,
 			MAX_SUSPEND_ABORT_LEN);
 		log_suspend_abort_reason(suspend_abort);
-		dev->power.direct_complete = false;
 		async_error = -EBUSY;
 		goto Complete;
 	}
@@ -1385,7 +1382,7 @@ static int __device_suspend(struct device *dev, pm_message_t state, bool async)
 		if (pm_runtime_status_suspended(dev)) {
 			pm_runtime_disable(dev);
 			if (pm_runtime_suspended_if_enabled(dev))
-				goto Complete;
+				goto Deltimer;
 
 			pm_runtime_enable(dev);
 		}
@@ -1458,6 +1455,8 @@ static int __device_suspend(struct device *dev, pm_message_t state, bool async)
 	}
 
 	device_unlock(dev);
+
+Deltimer:
 	dpm_watchdog_clear(&wd);
 
  Complete:
