@@ -35,13 +35,13 @@
 struct task_struct;
 struct exec_domain;
 
+#include <asm/stack_pointer.h>
 #include <asm/types.h>
 
 typedef unsigned long mm_segment_t;
 
 /*
  * low level task data that entry.S needs immediate access to.
- * __switch_to() assumes cpu_context follows immediately after cpu_domain.
  */
 struct thread_info {
 	unsigned long		flags;		/* low level flags */
@@ -57,15 +57,20 @@ struct thread_info {
 #ifndef CONFIG_THREAD_INFO_IN_TASK
 	int			cpu;		/* cpu */
 #endif
+#ifdef CONFIG_ARCH_THREAD_INFO_ALLOCATOR
+	phys_addr_t		phys_addr;	/* set if vmalloc */
+#endif
 };
 
 #ifdef CONFIG_THREAD_INFO_IN_TASK
 #define INIT_THREAD_INFO(tsk)						\
 {									\
+	.exec_domain	= &default_exec_domain,				\
 	.preempt_count	= INIT_PREEMPT_COUNT,				\
 	.addr_limit	= KERNEL_DS,					\
 }
 #else
+
 #define INIT_THREAD_INFO(tsk)						\
 {									\
 	.task		= &tsk,						\
@@ -74,13 +79,7 @@ struct thread_info {
 	.preempt_count	= INIT_PREEMPT_COUNT,				\
 	.addr_limit	= KERNEL_DS,					\
 }
-
 #define init_thread_info	(init_thread_union.thread_info)
-
-/*
- * how to get the current stack pointer from C
- */
-register unsigned long current_stack_pointer asm ("sp");
 
 /*
  * how to get the thread information struct from C
@@ -109,6 +108,12 @@ static inline struct thread_info *current_thread_info(void)
 #define thread_saved_fp(tsk)	\
 	((unsigned long)(tsk->thread.cpu_context.fp))
 
+#ifdef CONFIG_ARCH_THREAD_INFO_ALLOCATOR
+struct thread_info *alloc_thread_info_node(struct task_struct *tsk,
+						  int node);
+void free_thread_info(struct thread_info *ti);
+#endif
+
 #endif
 
 /*
@@ -126,7 +131,6 @@ static inline struct thread_info *current_thread_info(void)
 #define TIF_NEED_RESCHED	1
 #define TIF_NOTIFY_RESUME	2	/* callback before returning to user */
 #define TIF_FOREIGN_FPSTATE	3	/* CPU's FP state is not current's */
-#define TIF_FSCHECK		4	/* Check FS is USER_DS on return */
 #define TIF_NOHZ		7
 #define TIF_SYSCALL_TRACE	8
 #define TIF_SYSCALL_AUDIT	9
@@ -149,12 +153,10 @@ static inline struct thread_info *current_thread_info(void)
 #define _TIF_SYSCALL_AUDIT	(1 << TIF_SYSCALL_AUDIT)
 #define _TIF_SYSCALL_TRACEPOINT	(1 << TIF_SYSCALL_TRACEPOINT)
 #define _TIF_SECCOMP		(1 << TIF_SECCOMP)
-#define _TIF_FSCHECK		(1 << TIF_FSCHECK)
 #define _TIF_32BIT		(1 << TIF_32BIT)
 
 #define _TIF_WORK_MASK		(_TIF_NEED_RESCHED | _TIF_SIGPENDING | \
-				 _TIF_NOTIFY_RESUME | _TIF_FOREIGN_FPSTATE | \
-				 _TIF_FSCHECK)
+				 _TIF_NOTIFY_RESUME | _TIF_FOREIGN_FPSTATE)
 
 #define _TIF_SYSCALL_WORK	(_TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT | \
 				 _TIF_SYSCALL_TRACEPOINT | _TIF_SECCOMP | \
