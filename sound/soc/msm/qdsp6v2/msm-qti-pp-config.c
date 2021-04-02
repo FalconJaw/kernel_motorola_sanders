@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2019 The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -401,6 +401,7 @@ static int msm_afe_lb_vol_ctrl;
 static int msm_afe_sec_mi2s_lb_vol_ctrl;
 static int msm_afe_tert_mi2s_lb_vol_ctrl;
 static int msm_afe_quat_mi2s_lb_vol_ctrl;
+static int msm_afe_slim0_lb_vol_ctrl;
 static const DECLARE_TLV_DB_LINEAR(fm_rx_vol_gain, 0, INT_RX_VOL_MAX_STEPS);
 static const DECLARE_TLV_DB_LINEAR(afe_lb_vol_gain, 0, INT_RX_VOL_MAX_STEPS);
 
@@ -486,6 +487,22 @@ static int msm_qti_pp_set_icc_vol_mixer(struct snd_kcontrol *kcontrol,
 		adm_get_default_copp_idx(AFE_PORT_ID_QUATERNARY_TDM_TX),
 		ucontrol->value.integer.value[0]);
 	msm_route_icc_vol_control = ucontrol->value.integer.value[0];
+	return 0;
+}
+
+static int msm_qti_pp_get_slim0_lb_vol_mixer(struct snd_kcontrol *kcontrol,
+				       struct snd_ctl_elem_value *ucontrol)
+{
+	ucontrol->value.integer.value[0] = msm_afe_slim0_lb_vol_ctrl;
+	return 0;
+}
+
+static int msm_qti_pp_set_slim0_lb_vol_mixer(struct snd_kcontrol *kcontrol,
+			    struct snd_ctl_elem_value *ucontrol)
+{
+	afe_loopback_gain(AFE_PORT_ID_SLIMBUS_MULTI_CHAN_0_TX,
+			  ucontrol->value.integer.value[0]);
+	msm_afe_slim0_lb_vol_ctrl = ucontrol->value.integer.value[0];
 	return 0;
 }
 
@@ -593,32 +610,6 @@ static int msm_qti_pp_put_channel_map_mixer(struct snd_kcontrol *kcontrol,
 	for (i = 0; i < PCM_FORMAT_MAX_NUM_CHANNEL; i++)
 		channel_map[i] = (char)(ucontrol->value.integer.value[i]);
 	adm_set_multi_ch_map(channel_map, ADM_PATH_PLAYBACK);
-
-	return 0;
-}
-
-static int msm_qti_pp_get_channel_map_capture(struct snd_kcontrol *kcontrol,
-					    struct snd_ctl_elem_value *ucontrol)
-{
-	char channel_map[PCM_FORMAT_MAX_NUM_CHANNEL] = {0};
-	int i;
-
-	adm_get_multi_ch_map(channel_map, ADM_PATH_LIVE_REC);
-	for (i = 0; i < PCM_FORMAT_MAX_NUM_CHANNEL; i++)
-		ucontrol->value.integer.value[i] =
-			(unsigned int) channel_map[i];
-	return 0;
-}
-
-static int msm_qti_pp_put_channel_map_capture(struct snd_kcontrol *kcontrol,
-					    struct snd_ctl_elem_value *ucontrol)
-{
-	char channel_map[PCM_FORMAT_MAX_NUM_CHANNEL];
-	int i;
-
-	for (i = 0; i < PCM_FORMAT_MAX_NUM_CHANNEL; i++)
-		channel_map[i] = (char)(ucontrol->value.integer.value[i]);
-	adm_set_multi_ch_map(channel_map, ADM_PATH_LIVE_REC);
 
 	return 0;
 }
@@ -854,6 +845,12 @@ static const struct snd_kcontrol_new tert_mi2s_lb_vol_mixer_controls[] = {
 	msm_qti_pp_set_tert_mi2s_lb_vol_mixer, afe_lb_vol_gain),
 };
 
+static const struct snd_kcontrol_new slim0_lb_vol_mixer_controls[] = {
+	SOC_SINGLE_EXT_TLV("SLIM0 LOOPBACK Volume", SND_SOC_NOPM, 0,
+	INT_RX_VOL_GAIN, 0, msm_qti_pp_get_slim0_lb_vol_mixer,
+	msm_qti_pp_set_slim0_lb_vol_mixer, afe_lb_vol_gain),
+};
+
 static const struct snd_kcontrol_new int_hfp_vol_mixer_controls[] = {
 	SOC_SINGLE_EXT_TLV("Internal HFP RX Volume", SND_SOC_NOPM, 0,
 	INT_RX_VOL_GAIN, 0, msm_qti_pp_get_hfp_vol_mixer,
@@ -888,11 +885,6 @@ static const struct snd_kcontrol_new multi_ch_channel_map_mixer_controls[] = {
 	msm_qti_pp_put_channel_map_mixer),
 };
 
-static const struct snd_kcontrol_new multi_ch_channel_map_capture_controls[] = {
-	SOC_SINGLE_MULTI_EXT("Capture Device Channel Map", SND_SOC_NOPM, 0, 16,
-	0, PCM_FORMAT_MAX_NUM_CHANNEL, msm_qti_pp_get_channel_map_capture,
-	msm_qti_pp_put_channel_map_capture),
-};
 
 static const struct snd_kcontrol_new get_rms_controls[] = {
 	SOC_SINGLE_EXT("Get RMS", SND_SOC_NOPM, 0, 0xFFFFFFFF,
@@ -1056,6 +1048,9 @@ void msm_qti_pp_add_controls(struct snd_soc_platform *platform)
 	snd_soc_add_platform_controls(platform, tert_mi2s_lb_vol_mixer_controls,
 			ARRAY_SIZE(tert_mi2s_lb_vol_mixer_controls));
 
+	snd_soc_add_platform_controls(platform, slim0_lb_vol_mixer_controls,
+			ARRAY_SIZE(slim0_lb_vol_mixer_controls));
+
 	snd_soc_add_platform_controls(platform, int_hfp_vol_mixer_controls,
 			ARRAY_SIZE(int_hfp_vol_mixer_controls));
 
@@ -1073,10 +1068,6 @@ void msm_qti_pp_add_controls(struct snd_soc_platform *platform)
 	snd_soc_add_platform_controls(platform,
 				multi_ch_channel_map_mixer_controls,
 			ARRAY_SIZE(multi_ch_channel_map_mixer_controls));
-
-	snd_soc_add_platform_controls(platform,
-				multi_ch_channel_map_capture_controls,
-			ARRAY_SIZE(multi_ch_channel_map_capture_controls));
 
 	snd_soc_add_platform_controls(platform, get_rms_controls,
 			ARRAY_SIZE(get_rms_controls));
