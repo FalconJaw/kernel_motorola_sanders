@@ -23,6 +23,7 @@
 #include <linux/export.h>
 #include <linux/hid.h>
 #include <linux/module.h>
+#include <linux/freezer.h>
 #include <asm/unaligned.h>
 
 #include <linux/usb/composite.h>
@@ -289,6 +290,7 @@ static ssize_t ffs_ep0_write(struct file *file, const char __user *buf,
 
 		/* Handle data */
 		if (ffs->state == FFS_READ_DESCRIPTORS) {
+			pr_info("read descriptors\n");
 			ret = __ffs_data_got_descs(ffs, data, len);
 			if (unlikely(ret < 0))
 				break;
@@ -296,6 +298,7 @@ static ssize_t ffs_ep0_write(struct file *file, const char __user *buf,
 			ffs->state = FFS_READ_STRINGS;
 			ret = len;
 		} else {
+			pr_info("read strings\n");
 			ret = __ffs_data_got_strings(ffs, data, len);
 			if (unlikely(ret < 0))
 				break;
@@ -748,7 +751,7 @@ retry:
 		 * and wait for next epfile open to happen
 		 */
 		if (!atomic_read(&epfile->error)) {
-			ret = wait_event_interruptible(epfile->wait,
+			ret = wait_event_freezable(epfile->wait,
 					(ep = epfile->ep));
 			if (ret < 0)
 				goto error;
@@ -864,7 +867,7 @@ retry:
 		}
 
 		if (io_data->aio) {
-			req = usb_ep_alloc_request(ep->ep, GFP_ATOMIC);
+			req = usb_ep_alloc_request(ep->ep, GFP_KERNEL);
 			if (unlikely(!req))
 				goto error_lock;
 
@@ -3604,6 +3607,8 @@ static void ffs_closed(struct ffs_data *ffs)
 	    || !atomic_read(&opts->func_inst.group.cg_item.ci_kref.refcount))
 		goto done;
 
+	unregister_gadget_item(ffs_obj->opts->
+			       func_inst.group.cg_item.ci_parent->ci_parent);
 done:
 	ffs_dev_unlock();
 }
