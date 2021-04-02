@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -77,6 +77,29 @@
 #define QCA6174_FW_3_0	(0x30)
 #define QCA6174_FW_3_2	(0x32)
 #define BEELINER_FW	(0x00)
+#define AR6320_REV1_VERSION             0x5000000
+#define AR6320_REV1_1_VERSION           0x5000001
+#define AR6320_REV1_3_VERSION           0x5000003
+#define AR6320_REV2_1_VERSION           0x5010000
+#define AR6320_REV3_VERSION             0x5020000
+#define AR6320_REV3_2_VERSION           0x5030000
+#define AR900B_DEV_VERSION              0x1000000
+
+static struct cnss_fw_files FW_FILES_QCA6174_FW_1_1 = {
+"qwlan11.bin", "bdwlan11.bin", "otp11.bin", "utf11.bin",
+"utfbd11.bin", "epping11.bin", "evicted11.bin"};
+static struct cnss_fw_files FW_FILES_QCA6174_FW_2_0 = {
+"qwlan20.bin", "bdwlan20.bin", "otp20.bin", "utf20.bin",
+"utfbd20.bin", "epping20.bin", "evicted20.bin"};
+static struct cnss_fw_files FW_FILES_QCA6174_FW_1_3 = {
+"qwlan13.bin", "bdwlan13.bin", "otp13.bin", "utf13.bin",
+"utfbd13.bin", "epping13.bin", "evicted13.bin"};
+static struct cnss_fw_files FW_FILES_QCA6174_FW_3_0 = {
+"qwlan30.bin", "bdwlan30.bin", "otp30.bin", "utf30.bin",
+"utfbd30.bin", "epping30.bin", "evicted30.bin"};
+static struct cnss_fw_files FW_FILES_DEFAULT = {
+"qwlan.bin", "bdwlan.bin", "otp.bin", "utf.bin",
+"utfbd.bin", "epping.bin", "evicted.bin"};
 
 #define QCA6180_VENDOR_ID	(0x168C)
 #define QCA6180_DEVICE_ID	(0x0041)
@@ -287,7 +310,6 @@ static struct cnss_data {
 	bool monitor_wake_intr;
 	struct cnss_dual_wifi dual_wifi_info;
 	struct cnss_dev_platform_ops platform_ops;
-	enum cnss_sleep_power_mode sleep_power_mode;
 } *penv;
 
 static unsigned int pcie_link_down_panic;
@@ -305,6 +327,11 @@ static void cnss_put_wlan_enable_gpio(void)
 	else
 		gpio_free(gpio_info->num);
 }
+
+static char *regulatory_file = "bdwlan30.bin";
+module_param(regulatory_file, charp, S_IRUSR | S_IWUSR);
+MODULE_PARM_DESC(regulatory_file,
+		"Regulatory file to be picked up based on carrier");
 
 static int cnss_wlan_vreg_on(struct cnss_wlan_vreg_info *vreg_info)
 {
@@ -1101,6 +1128,40 @@ int cnss_get_fw_files(struct cnss_fw_files *pfw_files)
 }
 EXPORT_SYMBOL(cnss_get_fw_files);
 
+int cnss_get_fw_files_for_target(struct cnss_fw_files *pfw_files,
+					u32 target_type, u32 target_version)
+{
+	if (!pfw_files)
+		return -ENODEV;
+
+	pr_debug("regulatory_file name passed is %s\n", regulatory_file);
+	switch (target_version) {
+	case AR6320_REV1_VERSION:
+	case AR6320_REV1_1_VERSION:
+		memcpy(pfw_files, &FW_FILES_QCA6174_FW_1_1, sizeof(*pfw_files));
+		break;
+	case AR6320_REV1_3_VERSION:
+		memcpy(pfw_files, &FW_FILES_QCA6174_FW_1_3, sizeof(*pfw_files));
+		break;
+	case AR6320_REV2_1_VERSION:
+		memcpy(pfw_files, &FW_FILES_QCA6174_FW_2_0, sizeof(*pfw_files));
+		break;
+	case AR6320_REV3_VERSION:
+	case AR6320_REV3_2_VERSION:
+		memset(FW_FILES_QCA6174_FW_3_0.board_data, 0, CNSS_MAX_FILE_NAME);
+		strlcpy(FW_FILES_QCA6174_FW_3_0.board_data, regulatory_file, CNSS_MAX_FILE_NAME);
+		memcpy(pfw_files, &FW_FILES_QCA6174_FW_3_0, sizeof(*pfw_files));
+		break;
+	default:
+		memcpy(pfw_files, &FW_FILES_DEFAULT, sizeof(*pfw_files));
+		pr_err("%s version mismatch 0x%X 0x%X",
+				__func__, target_type, target_version);
+		break;
+	}
+	return 0;
+}
+EXPORT_SYMBOL(cnss_get_fw_files_for_target);
+
 #ifdef CONFIG_CNSS_SECURE_FW
 static void cnss_wlan_fw_mem_alloc(struct pci_dev *pdev)
 {
@@ -1595,7 +1656,6 @@ static void cnss_pcie_set_platform_ops(struct device *dev)
 	pf_ops->set_wlan_mac_address = cnss_pcie_set_wlan_mac_address;
 	pf_ops->power_up = cnss_pcie_power_up;
 	pf_ops->power_down = cnss_pcie_power_down;
-	pf_ops->set_sleep_power_mode = cnss_pci_set_sleep_power_mode;
 
 	dev->platform_data = pf_ops;
 }
@@ -1748,85 +1808,35 @@ static void cnss_wlan_pci_remove(struct pci_dev *pdev)
 		cnss_smmu_remove(&pdev->dev);
 }
 
-static int cnss_powerup(const struct subsys_desc *subsys);
-
-static int cnss_pci_change_power_mode(struct pci_dev *pdev,
-				      enum cnss_state state,
-				      enum cnss_sleep_power_mode sleep_mode)
-{
-	int ret = 0;
-	struct cnss_wlan_driver *wdriver;
-
-	if (!penv || !penv->driver || !pdev)
-		return ret;
-
-	if (sleep_mode != CNSS_SLEEP_POWER_MODE_RESET &&
-	    sleep_mode != CNSS_SLEEP_POWER_MODE_CUT_PWR) {
-		pr_err("wrong sleep power mode!\n");
-		return -EINVAL;
-	}
-
-	wdriver = penv->driver;
-	if (CNSS_SUSPEND == state && wdriver->shutdown) {
-		wdriver->shutdown(pdev);
-		if (penv->pcie_link_state) {
-			if (cnss_msm_pcie_pm_control(
-			    MSM_PCIE_SUSPEND,
-			    cnss_get_pci_dev_bus_number(pdev),
-			    pdev, PM_OPTIONS_SUSPEND_LINK_DOWN))
-				pr_err("%s: shutdown PCIe link fail\n",
-				       __func__);
-
-			penv->saved_state = NULL;
-			penv->pcie_link_state = PCIE_LINK_DOWN;
-		}
-		cnss_configure_wlan_en_gpio(WLAN_EN_LOW);
-		if (sleep_mode == CNSS_SLEEP_POWER_MODE_CUT_PWR) {
-			if (cnss_wlan_vreg_set(&penv->vreg_info,
-					       VREG_OFF))
-				pr_err("%s: set WLAN VREG_OFF fail\n",
-				       __func__);
-		}
-	} else if (CNSS_RESUME == state) {
-		cnss_powerup(NULL);
-	} else {
-		pr_err("fail to change power mode!\n");
-		ret = -EINVAL;
-	}
-
-	return ret;
-}
-
 static int cnss_wlan_pci_suspend(struct device *dev)
 {
 	int ret = 0;
 	struct cnss_wlan_driver *wdriver;
 	struct pci_dev *pdev = to_pci_dev(dev);
-	enum cnss_sleep_power_mode sleep_mode;
 
 	pm_message_t state = { .event = PM_EVENT_SUSPEND };
 
-	if (!penv || !penv->pcie_link_state || !penv->driver)
-		return ret;
+	if (!penv)
+		goto out;
+
+	if (!penv->pcie_link_state)
+		goto out;
+
 	wdriver = penv->driver;
+	if (!wdriver)
+		goto out;
 
-	sleep_mode = penv->sleep_power_mode;
-	if (CNSS_SLEEP_POWER_MODE_NONE != sleep_mode) {
-		ret = cnss_pci_change_power_mode(pdev, CNSS_SUSPEND,
-						 sleep_mode);
-	} else {
-		if (wdriver->suspend) {
-			ret = wdriver->suspend(pdev, state);
+	if (wdriver->suspend) {
+		ret = wdriver->suspend(pdev, state);
 
-			if (penv->pcie_link_state) {
-				pci_save_state(pdev);
-				penv->saved_state =
-					cnss_pci_store_saved_state(pdev);
-			}
+		if (penv->pcie_link_state) {
+			pci_save_state(pdev);
+			penv->saved_state = cnss_pci_store_saved_state(pdev);
 		}
 	}
 	penv->monitor_wake_intr = false;
 
+out:
 	return ret;
 }
 
@@ -1835,29 +1845,27 @@ static int cnss_wlan_pci_resume(struct device *dev)
 	int ret = 0;
 	struct cnss_wlan_driver *wdriver;
 	struct pci_dev *pdev = to_pci_dev(dev);
-	enum cnss_sleep_power_mode sleep_mode;
 
-	if (!penv || !penv->driver)
-		return ret;
+	if (!penv)
+		goto out;
+
+	if (!penv->pcie_link_state)
+		goto out;
+
 	wdriver = penv->driver;
+	if (!wdriver)
+		goto out;
 
-	sleep_mode = penv->sleep_power_mode;
-	if (CNSS_SLEEP_POWER_MODE_NONE != sleep_mode) {
-		ret = cnss_pci_change_power_mode(pdev, CNSS_RESUME,
-						 sleep_mode);
-	} else {
-		if (!penv->pcie_link_state)
-			return ret;
-		if (wdriver->resume && !penv->pcie_link_down_ind) {
-			if (penv->saved_state)
-				cnss_pci_load_and_free_saved_state(
-					pdev, &penv->saved_state);
-			pci_restore_state(pdev);
+	if (wdriver->resume && !penv->pcie_link_down_ind) {
+		if (penv->saved_state)
+			cnss_pci_load_and_free_saved_state(
+				pdev, &penv->saved_state);
+		pci_restore_state(pdev);
 
-			ret = wdriver->resume(pdev);
-		}
+		ret = wdriver->resume(pdev);
 	}
 
+out:
 	return ret;
 }
 
@@ -2138,7 +2146,7 @@ static void cnss_wlan_memory_expansion(void)
 {
 	struct device *dev;
 	const struct firmware *fw_entry;
-	const char *filename;
+	const char *filename = FW_FILES_QCA6174_FW_3_0.evicted_data;
 	u_int32_t fw_entry_size, size_left, dma_size_left, length;
 	char *fw_temp;
 	char *fw_data;
@@ -2148,7 +2156,6 @@ static void cnss_wlan_memory_expansion(void)
 	struct pci_dev *pdev;
 
 	mutex_lock(&penv->fw_setup_stat_lock);
-	filename = cnss_wlan_get_evicted_data_file();
 	pdev = penv->pdev;
 	dev = &pdev->dev;
 	cnss_seg_info = penv->cnss_seg_info;
@@ -2525,6 +2532,10 @@ void cnss_wlan_unregister_driver(struct cnss_wlan_driver *driver)
 		return;
 	}
 
+	if (penv->bus_client)
+		msm_bus_scale_client_update_request(penv->bus_client,
+						    CNSS_BUS_WIDTH_NONE);
+
 	if (!pdev) {
 		pr_err("%d: invalid pdev\n", __LINE__);
 		goto cut_power;
@@ -2546,7 +2557,7 @@ void cnss_wlan_unregister_driver(struct cnss_wlan_driver *driver)
 			MSM_PCIE_SUSPEND, cnss_get_pci_dev_bus_number(pdev),
 			pdev, PM_OPTIONS)) {
 			pr_err("Failed to shutdown PCIe link\n");
-			goto bus_request;
+			return;
 		}
 	} else if (penv->pcie_link_state && penv->pcie_link_down_ind) {
 		penv->saved_state = NULL;
@@ -2555,7 +2566,7 @@ void cnss_wlan_unregister_driver(struct cnss_wlan_driver *driver)
 			MSM_PCIE_SUSPEND, cnss_get_pci_dev_bus_number(pdev),
 				pdev, PM_OPTIONS_SUSPEND_LINK_DOWN)) {
 			pr_err("Failed to shutdown PCIe link (with linkdown option)\n");
-			goto bus_request;
+			return;
 		}
 	}
 	penv->pcie_link_state = PCIE_LINK_DOWN;
@@ -2569,10 +2580,6 @@ cut_power:
 	cnss_configure_wlan_en_gpio(WLAN_EN_LOW);
 	if (cnss_wlan_vreg_set(vreg_info, VREG_OFF))
 		pr_err("wlan vreg OFF failed\n");
-bus_request:
-	if (penv->bus_client)
-		msm_bus_scale_client_update_request(penv->bus_client,
-						    CNSS_BUS_WIDTH_NONE);
 }
 EXPORT_SYMBOL(cnss_wlan_unregister_driver);
 
@@ -2785,14 +2792,10 @@ err_pcie_link_up:
 	cnss_configure_wlan_en_gpio(WLAN_EN_LOW);
 	cnss_wlan_vreg_set(vreg_info, VREG_OFF);
 	if (penv->pdev) {
-		if (wdrv && wdrv->update_status)
-			wdrv->update_status(penv->pdev, CNSS_SSR_FAIL);
-		if (!penv->recovery_in_progress) {
-			pr_err("%d: Unregistering pci device\n", __LINE__);
-			pci_unregister_driver(&cnss_wlan_pci_driver);
-			penv->pdev = NULL;
-			penv->pci_register_again = true;
-		}
+		pr_err("%d: Unregistering pci device\n", __LINE__);
+		pci_unregister_driver(&cnss_wlan_pci_driver);
+		penv->pdev = NULL;
+		penv->pci_register_again = true;
 	}
 
 err_wlan_vreg_on:
@@ -2969,7 +2972,6 @@ static int cnss_probe(struct platform_device *pdev)
 	penv->vreg_info.state = VREG_OFF;
 	penv->pci_register_again = false;
 	mutex_init(&penv->fw_setup_stat_lock);
-	penv->sleep_power_mode = CNSS_SLEEP_POWER_MODE_NONE;
 
 	ret = cnss_wlan_get_resources(pdev);
 	if (ret)
@@ -3410,27 +3412,6 @@ int cnss_get_bmi_setup(void)
 	return penv->bmi_test;
 }
 EXPORT_SYMBOL(cnss_get_bmi_setup);
-
-int cnss_pci_set_sleep_power_mode(enum cnss_sleep_power_mode mode)
-{
-	int ret = 0;
-
-	if (!penv)
-		return -ENODEV;
-
-	switch (mode) {
-	case CNSS_SLEEP_POWER_MODE_NONE:
-	case CNSS_SLEEP_POWER_MODE_RESET:
-	case CNSS_SLEEP_POWER_MODE_CUT_PWR:
-		penv->sleep_power_mode = mode;
-		break;
-	default:
-		pr_err("%s: Invalid sleep power mode %d", __func__, mode);
-		ret = -EINVAL;
-	}
-
-	return ret;
-}
 
 #ifdef CONFIG_CNSS_SECURE_FW
 int cnss_get_sha_hash(const u8 *data, u32 data_len, u8 *hash_idx, u8 *out)
@@ -3920,7 +3901,7 @@ int cnss_pcie_power_down(struct device *dev)
 	return ret;
 }
 
-module_init(cnss_initialize);
+fs_initcall(cnss_initialize);
 module_exit(cnss_exit);
 
 MODULE_LICENSE("GPL v2");

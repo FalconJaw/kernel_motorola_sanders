@@ -41,6 +41,9 @@ static int __uvc_query_ctrl(struct uvc_device *dev, __u8 query, __u8 unit,
 			      : usb_sndctrlpipe(dev->udev, 0);
 	type |= (query & 0x80) ? USB_DIR_IN : USB_DIR_OUT;
 
+	if (dev->quirks & UVC_QUIRK_QUERY_CONTROL_DELAY)
+		msleep(3);
+
 	return usb_control_msg(dev->udev, pipe, query, type, cs << 8,
 			unit << 8 | intfnum, data, size, timeout);
 }
@@ -155,27 +158,14 @@ static void uvc_fixup_video_ctrl(struct uvc_streaming *stream,
 	}
 }
 
-static size_t uvc_video_ctrl_size(struct uvc_streaming *stream)
-{
-	/*
-	 * Return the size of the video probe and commit controls, which depends
-	 * on the protocol version.
-	 */
-	if (stream->dev->uvc_version < 0x0110)
-		return 26;
-	else if (stream->dev->uvc_version < 0x0150)
-		return 34;
-	else
-		return 48;
-}
-
 static int uvc_get_video_ctrl(struct uvc_streaming *stream,
 	struct uvc_streaming_control *ctrl, int probe, __u8 query)
 {
-	__u16 size = uvc_video_ctrl_size(stream);
 	__u8 *data;
+	__u16 size;
 	int ret;
 
+	size = stream->dev->uvc_version >= 0x0110 ? 34 : 26;
 	if ((stream->dev->quirks & UVC_QUIRK_PROBE_DEF) &&
 			query == UVC_GET_DEF)
 		return -EIO;
@@ -230,7 +220,7 @@ static int uvc_get_video_ctrl(struct uvc_streaming *stream,
 	ctrl->dwMaxVideoFrameSize = get_unaligned_le32(&data[18]);
 	ctrl->dwMaxPayloadTransferSize = get_unaligned_le32(&data[22]);
 
-	if (size >= 34) {
+	if (size == 34) {
 		ctrl->dwClockFrequency = get_unaligned_le32(&data[26]);
 		ctrl->bmFramingInfo = data[30];
 		ctrl->bPreferedVersion = data[31];
@@ -259,10 +249,11 @@ out:
 static int uvc_set_video_ctrl(struct uvc_streaming *stream,
 	struct uvc_streaming_control *ctrl, int probe)
 {
-	__u16 size = uvc_video_ctrl_size(stream);
 	__u8 *data;
+	__u16 size;
 	int ret;
 
+	size = stream->dev->uvc_version >= 0x0110 ? 34 : 26;
 	data = kzalloc(size, GFP_KERNEL);
 	if (data == NULL)
 		return -ENOMEM;
@@ -279,7 +270,7 @@ static int uvc_set_video_ctrl(struct uvc_streaming *stream,
 	put_unaligned_le32(ctrl->dwMaxVideoFrameSize, &data[18]);
 	put_unaligned_le32(ctrl->dwMaxPayloadTransferSize, &data[22]);
 
-	if (size >= 34) {
+	if (size == 34) {
 		put_unaligned_le32(ctrl->dwClockFrequency, &data[26]);
 		data[30] = ctrl->bmFramingInfo;
 		data[31] = ctrl->bPreferedVersion;
@@ -1885,7 +1876,7 @@ int uvc_video_enable(struct uvc_streaming *stream, int enable)
 		if (stream->intf->num_altsetting > 1) {
 			usb_set_interface(stream->dev->udev,
 					  stream->intfnum, 0);
-		} else {
+		} else if (!(stream->dev->quirks & UVC_QUIRK_NO_CLEAR_HALT)) {
 			/* UVC doesn't specify how to inform a bulk-based device
 			 * when the video stream is stopped. Windows sends a
 			 * CLEAR_FEATURE(HALT) request to the video streaming
