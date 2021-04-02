@@ -139,11 +139,8 @@ static void diag_usb_buf_tbl_remove(struct diag_usb_info *usb_info,
 			 * Remove reference from the table if it is the
 			 * only instance of the buffer
 			 */
-			if (atomic_read(&entry->ref_count) == 0) {
+			if (atomic_read(&entry->ref_count) == 0)
 				list_del(&entry->track);
-				kfree(entry);
-				entry = NULL;
-			}
 			break;
 		}
 	}
@@ -219,6 +216,13 @@ static void usb_connect_work_fn(struct work_struct *work)
  */
 static void usb_disconnect(struct diag_usb_info *ch)
 {
+	if (!ch)
+		return;
+
+	if (!atomic_read(&ch->connected) &&
+		driver->usb_connected && diag_mask_param())
+		diag_clear_masks(0);
+
 	if (ch && ch->ops && ch->ops->close)
 		ch->ops->close(ch->ctxt, DIAG_USB_MODE);
 }
@@ -227,14 +231,6 @@ static void usb_disconnect_work_fn(struct work_struct *work)
 {
 	struct diag_usb_info *ch = container_of(work, struct diag_usb_info,
 						disconnect_work);
-
-	if (!ch)
-		return;
-
-	if (!atomic_read(&ch->connected) &&
-		driver->usb_connected && diag_mask_param())
-		diag_clear_masks(0);
-
 	usb_disconnect(ch);
 }
 
@@ -301,7 +297,8 @@ static void usb_read_done_work_fn(struct work_struct *work)
 }
 
 static void diag_usb_write_done(struct diag_usb_info *ch,
-				struct diag_request *req)
+				struct diag_request *req,
+				int sync)
 {
 	int ctxt = 0;
 	int len = 0;
@@ -328,13 +325,13 @@ static void diag_usb_write_done(struct diag_usb_info *ch,
 	}
 	DIAG_LOG(DIAG_DEBUG_MUX, "full write_done, ctxt: %d\n",
 		 ctxt);
-	spin_lock_irqsave(&ch->write_lock, flags);
+	if (!sync)
+		spin_lock_irqsave(&ch->write_lock, flags);
 	list_del(&entry->track);
 	ctxt = entry->ctxt;
 	buf = entry->buf;
 	len = entry->len;
 	kfree(entry);
-	entry = NULL;
 	diag_ws_on_copy_complete(DIAG_WS_MUX);
 
 	if (ch->ops && ch->ops->write_done)
@@ -342,7 +339,8 @@ static void diag_usb_write_done(struct diag_usb_info *ch,
 	buf = NULL;
 	len = 0;
 	ctxt = 0;
-	spin_unlock_irqrestore(&ch->write_lock, flags);
+	if (!sync)
+		spin_unlock_irqrestore(&ch->write_lock, flags);
 	diagmem_free(driver, req, ch->mempool);
 }
 
@@ -381,7 +379,10 @@ static void diag_usb_notifier(void *priv, unsigned event,
 			   &usb_info->read_done_work);
 		break;
 	case USB_DIAG_WRITE_DONE:
-		diag_usb_write_done(usb_info, d_req);
+		diag_usb_write_done(usb_info, d_req, 0);
+		break;
+	case USB_DIAG_WRITE_DONE_SYNC:
+		diag_usb_write_done(usb_info, d_req, 1);
 		break;
 	default:
 		pr_err_ratelimited("diag: Unknown event from USB diag\n");
