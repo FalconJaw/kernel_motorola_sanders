@@ -490,7 +490,6 @@ again:
 	 * From this point on, mapping will be re-verified if necessary and
 	 * page lock will be acquired only if it is unavoidable
 	 */
-
 	mapping = READ_ONCE(page_head->mapping);
 
 	/*
@@ -516,8 +515,8 @@ again:
 		 * applies. If this is really a shmem page then the page lock
 		 * will prevent unexpected transitions.
 		 */
-		lock_page(page);
-		shmem_swizzled = PageSwapCache(page) || page->mapping;
+		lock_page(page_head);
+		shmem_swizzled = PageSwapCache(page_head) || page_head->mapping;
 		unlock_page(page_head);
 		put_page(page_head);
 
@@ -1601,9 +1600,6 @@ static int futex_requeue(u32 __user *uaddr1, unsigned int flags,
 	if (nr_wake < 0 || nr_requeue < 0)
 		return -EINVAL;
 
-	if (nr_wake < 0 || nr_requeue < 0)
-		return -EINVAL;
-
 	if (requeue_pi) {
 		/*
 		 * Requeue PI only works on two distinct uaddrs. This
@@ -1921,12 +1917,8 @@ static int unqueue_me(struct futex_q *q)
 
 	/* In the common case we don't take the spinlock, which is nice. */
 retry:
-	/*
-	 * q->lock_ptr can change between this read and the following spin_lock.
-	 * Use READ_ONCE to forbid the compiler from reloading q->lock_ptr and
-	 * optimizing lock_ptr out of the logic below.
-	 */
-	lock_ptr = READ_ONCE(q->lock_ptr);
+	lock_ptr = q->lock_ptr;
+	barrier();
 	if (lock_ptr != NULL) {
 		spin_lock(lock_ptr);
 		/*
